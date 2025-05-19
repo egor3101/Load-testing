@@ -9,9 +9,10 @@ import socket
 
 # Конфигурация
 TARGET_URL = "https://travel-click.ru/login.page"
-REQUESTS_COUNT = 1000
-THREADS_COUNT = 100
-TEST_DURATION = 120
+REQUESTS_COUNT = 1500  # Увеличиваем нагрузку
+THREADS_COUNT = 150  # Больше потоков
+TEST_DURATION = 180  # 3 минуты
+REQUEST_TIMEOUT = (3.05, 15)  # Увеличили таймаут
 
 # Инициализация
 ua = UserAgent()
@@ -28,136 +29,132 @@ def get_random_headers():
     }
 
 
-def get_request_params():
-    return {
-        'headers': get_random_headers(),
-        'timeout': (3.05, 10),
-        'allow_redirects': True,
-        'verify': True
-    }
-
-
 def enhanced_send_request(url, request_num):
     metrics = {
         'request_num': request_num,
         'status': None,
         'time': None,
         'success': False,
-        'error_type': 'None',
-        'error_details': 'None',
+        'error_type': None,
+        'error_details': None,
         'response_size': 0,
         'redirects': 0,
-        'dns_time': None
+        'dns_time': None,
+        'server_ip': None,
+        'response_headers': None
     }
 
     try:
-        # Измерение DNS
+        # Измерение DNS и получение IP сервера
         start_dns = time.time()
-        try:
-            hostname = url.split('/')[2]
-            socket.gethostbyname(hostname)
-            metrics['dns_time'] = time.time() - start_dns
-        except Exception as e:
-            metrics['dns_time'] = -1
-            raise
+        hostname = url.split('/')[2]
+        server_ip = socket.gethostbyname(hostname)
+        metrics.update({
+            'dns_time': time.time() - start_dns,
+            'server_ip': server_ip
+        })
 
-        # Полный запрос
+        # Отправка запроса
         start_time = time.time()
-        response = session.get(url, **get_request_params())
+        response = session.get(
+            url,
+            headers=get_random_headers(),
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True
+        )
 
         metrics.update({
             'status': response.status_code,
             'time': time.time() - start_time,
-            'success': response.status_code == 200,
+            'success': True,
             'response_size': len(response.content),
             'url': response.url,
             'redirects': len(response.history),
-            'error_type': 'None',
-            'error_details': 'None'
+            'response_headers': dict(response.headers)
         })
 
-    except requests.exceptions.SSLError as e:
-        metrics.update({
-            'error_type': 'SSL Error',
-            'error_details': str(e) or 'SSL Handshake failed'
-        })
-    except requests.exceptions.ConnectionError as e:
-        metrics.update({
-            'error_type': 'Connection Error',
-            'error_details': str(e) or 'Connection failed'
-        })
-    except requests.exceptions.Timeout as e:
-        metrics.update({
-            'error_type': 'Timeout',
-            'error_details': str(e) or 'Request timed out'
-        })
     except Exception as e:
+        error_type = type(e).__name__
+        error_details = str(e) or "No details"
+
+        # Специальная обработка для None-ошибок
+        if error_details == "None":
+            error_details = "Empty error message"
+            error_type = "EmptyError"
+
         metrics.update({
-            'error_type': 'Other Error',
-            'error_details': str(e) or 'Unknown error occurred'
+            'error_type': error_type,
+            'error_details': error_details,
+            'time': time.time() - start_time if 'start_time' in locals() else None
         })
 
     return metrics
-
-
-def safe_get_error_details(error_dict):
-    details = error_dict.get('error_details', 'No details')
-    if details is None:
-        return 'No details'
-    return str(details)[:120]
 
 
 def analyze_results(metrics):
     successful = [m for m in metrics if m['success']]
     failed = [m for m in metrics if not m['success']]
 
-    print("\n📊 DETAILED TEST RESULTS:")
-    print(f"✅ Successful requests: {len(successful)}/{len(metrics)} ({len(successful) / len(metrics) * 100:.1f}%)")
+    print("\n📊 ENHANCED TEST RESULTS:")
+    print(f"✅ Successful: {len(successful)}/{len(metrics)} ({len(successful) / len(metrics) * 100:.1f}%)")
 
     if successful:
-        avg_time = sum(m['time'] for m in successful if m['time']) / len(successful)
-        avg_dns = sum(m['dns_time'] for m in successful if m['dns_time'] and m['dns_time'] > 0) / max(1, len([m for m in
-                                                                                                              successful
-                                                                                                              if m[
-                                                                                                                  'dns_time'] and
-                                                                                                              m[
-                                                                                                                  'dns_time'] > 0]))
-        print(f"⏱ Avg response time: {avg_time:.3f}s (DNS: {avg_dns:.3f}s)")
+        avg_time = sum(m['time'] for m in successful) / len(successful)
+        avg_dns = sum(m['dns_time'] for m in successful) / len(successful)
+        print(f"⏱ Avg response: {avg_time:.3f}s | DNS: {avg_dns:.3f}s")
+        print(f"🔗 Avg size: {sum(m['response_size'] for m in successful) / len(successful) / 1024:.2f} KB")
 
     if failed:
-        error_analysis = defaultdict(int)
+        print("\n🔍 FAILURE ANALYSIS:")
+        error_types = defaultdict(list)
         for m in failed:
-            error_analysis[m.get('error_type', 'Unknown')] += 1
+            error_types[m['error_type']].append(m)
 
-        print("\n🔍 Error Analysis:")
-        for error_type, count in sorted(error_analysis.items(), key=lambda x: x[1], reverse=True):
-            print(f"  {error_type}: {count} errors")
+        for error_type, errors in sorted(error_types.items(), key=lambda x: len(x[1]), reverse=True):
+            print(f"\n❌ {error_type}: {len(errors)} errors")
 
-            examples = [m for m in failed if m.get('error_type') == error_type][:3]
-            for ex in examples:
-                print(f"    - {safe_get_error_details(ex)}")
+            # Анализ первых 3 ошибок каждого типа
+            for error in errors[:3]:
+                details = error['error_details']
+                print(f"   - {details[:120]}" if details else "   - No details")
+
+                # Дополнительная информация для ConnectionError
+                if error_type == 'ConnectionError':
+                    print(f"     Request #{error['request_num']} | Time: {error['time']:.3f}s")
 
 
 def run_load_test():
-    print(f"🔥 Starting ENHANCED load test for {TARGET_URL}")
-    print(f"⚡ Parameters: {REQUESTS_COUNT} requests, {THREADS_COUNT} threads")
+    print(f"🔥 STARTING LOAD TEST: {TARGET_URL}")
+    print(f"⚡ Configuration: {REQUESTS_COUNT} requests, {THREADS_COUNT} threads")
 
     metrics = []
+    start_test_time = time.time()
+
     with ThreadPoolExecutor(max_workers=THREADS_COUNT) as executor:
         futures = [executor.submit(enhanced_send_request, TARGET_URL, i) for i in range(REQUESTS_COUNT)]
 
         for i, future in enumerate(as_completed(futures)):
             metrics.append(future.result())
-            if i % 50 == 0 or i == REQUESTS_COUNT - 1:
-                print(f"\r🚀 Sent {i + 1}/{REQUESTS_COUNT} requests...", end='', flush=True)
+
+            # Вывод прогресса
+            if i % 100 == 0 or i == REQUESTS_COUNT - 1:
+                elapsed = time.time() - start_test_time
+                error_count = len([m for m in metrics if not m['success']])
+                print(
+                    f"\r🚀 Progress: {i + 1}/{REQUESTS_COUNT} | "
+                    f"{len(metrics)/(elapsed or 1):.1f} req/sec | "
+                    f"Errors: {error_count}",
+                    end=''
+                )
 
     analyze_results(metrics)
 
+    # Сохранение результатов
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    filename = f"travelclick_loadtest_{timestamp}.json"
+    filename = f"travelclick_test_{timestamp}.json"
     with open(filename, 'w') as f:
         json.dump(metrics, f, indent=2)
-    print(f"\n📄 Full results saved to {filename}")
+    print(f"\n\n📄 Full results saved to {filename}")
 
 
 if __name__ == "__main__":
